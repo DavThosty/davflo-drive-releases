@@ -1,0 +1,49 @@
+# Kommt ins öffentliche Release-Repo als .github/workflows/publish.yml.
+# Ein Push auf einen Branch "upload/v<version>" mit Dateien in upload/ (große Dateien als *.part-NN zerlegt)
+# erzeugt das Release v<version> mit allen Dateien + manifest.json und löscht den Upload-Branch wieder.
+name: Release veröffentlichen
+on:
+  push:
+    branches: ["upload/**"]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dateien zusammensetzen
+        run: |
+          set -e
+          VER="${GITHUB_REF_NAME#upload/v}"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          mkdir -p out
+          cd upload
+          for f in $(ls | grep -E '\.part-[0-9]+$' | sed -E 's/\.part-[0-9]+$//' | sort -u); do
+            cat $(ls "$f".part-* | sort) > "../out/$f"
+          done
+          for f in $(ls | grep -vE '\.part-[0-9]+$'); do cp "$f" ../out/; done
+      - name: Manifest erzeugen
+        run: |
+          set -e
+          cd out
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VER}"
+          entry() { [ -f "$1" ] || return 0; printf '"%s": {"file": "%s", "url": "%s/%s", "size": %s, "sha256": "%s"}' "$2" "$1" "$BASE" "$1" "$(stat -c %s "$1")" "$(sha256sum "$1" | cut -d' ' -f1)"; }
+          W=$(ls DavFloDrive-*-Windows.zip 2>/dev/null | head -n1 || true)
+          M=$(ls DavFloDrive-*-Mac.zip 2>/dev/null | head -n1 || true)
+          parts=()
+          [ -n "$W" ] && parts+=("$(entry "$W" windows)")
+          [ -n "$M" ] && parts+=("$(entry "$M" mac)")
+          [ -f DavFloDrive-Musik.pck ] && parts+=("$(entry DavFloDrive-Musik.pck music)")
+          ( IFS=,; echo "{\"version\": \"$VER\", ${parts[*]}}" ) > manifest.json
+          cat manifest.json
+      - name: Release erstellen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          NOTES=out/NOTES.txt; [ -f "$NOTES" ] || echo "DavFlo Drive $VER" > "$NOTES"
+          gh release delete "v$VER" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$VER" out/* --title "DavFlo Drive $VER" --notes-file "$NOTES" --target main --latest
+      - name: Upload-Branch löschen
+        run: git push origin --delete "$GITHUB_REF_NAME"
